@@ -1,0 +1,6 @@
+# Written by Claude Code beside a mod it hot-reloads
+.claude-plugin/types/
+/tsconfig.json
+
+__pycache__/
+*.pyc

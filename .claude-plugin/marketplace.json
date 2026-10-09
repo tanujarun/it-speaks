@@ -1,0 +1,14 @@
+{
+  "name": "it-speaks",
+  "owner": { "name": "Tanuj Arun" },
+  "metadata": {
+    "description": "It Speaks: a Claude Code mod that reads replies and prompts aloud on request, with a local open-source voice."
+  },
+  "plugins": [
+    {
+      "name": "read-aloud",
+      "source": "./",
+      "description": "Reads Claude's replies and your prompts aloud on request, with the open-source Kokoro TTS model."
+    }
+  ]
+}

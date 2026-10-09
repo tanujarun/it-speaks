@@ -1,0 +1,9 @@
+{
+  "name": "read-aloud",
+  "version": "0.2.1",
+  "description": "Reads Claude's replies and your prompts aloud on request, with the open-source Kokoro TTS model.",
+  "author": { "name": "Tanuj Arun", "url": "https://github.com/tanujarun" },
+  "homepage": "https://github.com/tanujarun/it-speaks",
+  "keywords": ["claude-code-mods", "mods", "tts", "speech", "accessibility"],
+  "types": "./types/index.d.ts"
+}
