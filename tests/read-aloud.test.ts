@@ -39,7 +39,12 @@ const machine = (on: On, settings?: Record<string, unknown>) => {
   on('ui.log', () => ({ value: undefined }))
   on('fs.exists', () => ({ value: true }))
   on('fs.write', (_$, e) => {
-    commands.push(JSON.parse(e.text) as Command)
+    const command = JSON.parse(e.text) as Command
+    commands.push(command)
+    // The speech process exits on a quit, as the real one does.
+    if (command.op === 'quit') {
+      end()
+    }
 
     return { value: undefined }
   })
@@ -317,6 +322,69 @@ describe('read-aloud', () => {
     const hidden = await $.ui.mount({ ...reply('Hidden.'), surface: 'terminal', viewport: SCREEN })
     expect(await hidden.find({ type: 'Button' })).toBeUndefined()
     end()
+  })
+
+  test('/read-aloud update stops the speech process, runs the updater, and says the mod is behind', async ($, on) => {
+    const { commands, spawned } = machine(on)
+    const ran: (readonly string[])[] = []
+    on('process.run', (_$, e) => {
+      ran.push(e.argv)
+
+      return {
+        value: {
+          exitCode: 0,
+          stdout:
+            'packages: kokoro-onnx 0.6.1 -> 0.6.2\nmodels: downloading kokoro-v1.0.onnx\nmodels: kokoro-v1.0.onnx 31 MB of 310\nread-aloud: ready (Kokoro-82M v1.0)\n',
+          stderr: '',
+          isStdoutTruncated: false,
+          isStderrTruncated: false,
+        },
+      }
+    })
+    on('fs.read', () => ({ value: '{"version": "0.3.0", "homepage": "https://github.com/tanujarun/it-speaks"}' }))
+    const fetched: string[] = []
+    on('http.fetch', (_$, e) => {
+      fetched.push(e.url)
+
+      return { value: { status: 200, ok: true, headers: {}, text: '{"version": "0.4.0"}' } }
+    })
+    await begin($)
+
+    const updated = await $.command.run(slash('read-aloud', 'update'))
+
+    expect(commands.at(-1)).toEqual({ op: 'quit' })
+    expect(ran[0]?.slice(-2)).toEqual([expect.stringContaining('tts/setup.py'), 'update'])
+    expect(spawned.length).toBe(2)
+    expect(fetched).toEqual(['https://raw.githubusercontent.com/tanujarun/it-speaks/HEAD/.claude-plugin/plugin.json'])
+    expect(updated.text).toBe(
+      [
+        'read-aloud: the voice is up to date.',
+        'packages: kokoro-onnx 0.6.1 -> 0.6.2',
+        'models: downloading kokoro-v1.0.onnx',
+        'read-aloud: ready (Kokoro-82M v1.0)',
+        'mod: version 0.4.0 is out and this is 0.3.0. Update it with: claude plugin update, then /reload-plugins',
+      ].join('\n'),
+    )
+  })
+
+  test('/read-aloud update reports a failed update, and nothing on the mod it cannot reach', async ($, on) => {
+    machine(on)
+    on('process.run', () => ({
+      value: {
+        exitCode: 1,
+        stdout: '',
+        stderr: 'ERROR: Could not install packages: [WinError 5] Access is denied',
+        isStdoutTruncated: false,
+        isStderrTruncated: false,
+      },
+    }))
+    await begin($)
+
+    const updated = await $.command.run(slash('read-aloud', 'update'))
+
+    expect(updated.text).toBe(
+      'read-aloud: the update failed.\nERROR: Could not install packages: [WinError 5] Access is denied',
+    )
   })
 
   test('/read-aloud last reads the last reply, and selection what is selected', async ($, on) => {

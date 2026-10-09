@@ -42,6 +42,33 @@ python tts/setup.py
 `python tts/setup.py check` says what is in place. Deleting
 `~/.claude/read-aloud` removes all of it.
 
+## Updating
+
+```
+/read-aloud update
+```
+
+does three things and says what each came to:
+
+- **Packages.** Upgrades the voice runtime's Python packages to their newest
+  release, and names each change in the form `<package> <old> -> <new>`.
+- **Model.** Checks each model file against the SHA-256 that `tts/models.json`
+  names, downloads one that is missing or different, and removes a file an
+  earlier version of the mod installed and this one no longer uses.
+- **The mod.** Compares this copy's version with the one published here and
+  says when it is behind. The mod itself is updated by Claude Code:
+  `claude plugin update`, then `/reload-plugins`.
+
+The speech process is stopped for the update and started again after it. If
+packages fail to install with "access is denied", another Claude Code session
+is speaking with them: `/hush` there, or close it, and run the update again.
+From a shell the same is `python tts/setup.py update`.
+
+A new model release reaches people as a new version of the mod: `models.json`
+names the packages, each file's address and its checksum, so changing the
+model is an edit to that one file, and `/read-aloud update` after the mod
+updates brings an install in line with it.
+
 ## Reading what you pick
 
 - **The trigger.** Click `🔊 read` under a reply or a prompt. It turns into
@@ -87,6 +114,7 @@ order, first outermost. Then start a new session.
 | `/read-aloud prompt-voice <name>` | The voice for your prompts |
 | `/read-aloud speed <0.5-2>` | Speaking rate |
 | `/read-aloud volume <0-200>` | Percent |
+| `/read-aloud update` | Upgrades the voice packages and model; says if the mod is behind |
 
 To have it read without being asked:
 

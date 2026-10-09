@@ -30,7 +30,13 @@ type Settings = {
   limit: number
 }
 
-type Daemon = { spool: string; sequence: number; voices: readonly string[] }
+type Daemon = {
+  spool: string
+  sequence: number
+  voices: readonly string[]
+  /** Settles when the speech process has exited. */
+  ended: Promise<void>
+}
 
 type DaemonEvent = { event?: string; id?: unknown; voices?: unknown; message?: unknown }
 
@@ -71,6 +77,7 @@ const HELP = [
   '/read-aloud limit <characters>   longest reply read unasked; 0 reads all of it',
   '/read-aloud say <text>           says the text',
   '/read-aloud setup                installs the voice model (about 340 MB)',
+  '/read-aloud update               upgrades the voice packages and model, and says if the mod is behind',
   '/hush                            stops the speech now',
 ].join('\n')
 
@@ -147,8 +154,10 @@ const homeFolder = async ($: EngineInterface): Promise<string> => {
 
 /** The runtime's Python, or undefined while tts/setup.py has not run. */
 const findPython = async ($: EngineInterface, home: string): Promise<string | undefined> => {
-  const hasModel = await $.fs.exists(`${home}/models/kokoro-v1.0.onnx`)
-  if (!hasModel) {
+  // setup.py records a finished install; one from before it did has the model.
+  const isInstalled =
+    (await $.fs.exists(`${home}/installed.json`)) || (await $.fs.exists(`${home}/models/kokoro-v1.0.onnx`))
+  if (!isInstalled) {
     return undefined
   }
   for (const python of [`${home}/venv/Scripts/python.exe`, `${home}/venv/bin/python`]) {
@@ -230,11 +239,11 @@ const start = async ($: EngineInterface): Promise<Daemon | undefined> => {
   }
 
   const name = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
-  const mine: Daemon = { spool: `${home}/spool/${name}`, sequence: 0, voices: [] }
+  const mine: Daemon = { spool: `${home}/spool/${name}`, sequence: 0, voices: [], ended: Promise.resolve() }
   const script = `${$.plugin.root.replace(/\\/g, '/')}/tts/daemon.py`
 
   daemon = mine
-  void follow($, mine, [python, '-B', script, '--spool', mine.spool, '--models', `${home}/models`])
+  mine.ended = follow($, mine, [python, '-B', script, '--spool', mine.spool, '--models', `${home}/models`])
 
   return mine
 }
@@ -392,13 +401,31 @@ const describe = async ($: EngineInterface): Promise<string> => {
   ].join('\n')
 }
 
-const setUp = async ($: EngineInterface): Promise<string> => {
+/** Ends the speech process and waits for it, so no file of its is in use. */
+const stopDaemon = async ($: EngineInterface): Promise<void> => {
+  const mine = daemon
+  if (mine === undefined) {
+    return
+  }
+  awaited = undefined
+  await send($, { op: 'quit' })
+  // Three seconds at most; where no clock answers, its exit alone ends the wait.
+  const patience = $.clock.sleep(3000).catch(() => new Promise<void>(() => {}))
+  await Promise.race([mine.ended, patience])
+  await setPlaying($, undefined)
+}
+
+type SetupRun = { isDone: boolean; report: string }
+
+/** Runs tts/setup.py with the machine's Python: `all` installs, `update` the same on an install. */
+const runSetup = async ($: EngineInterface, step: 'all' | 'update'): Promise<SetupRun> => {
   const script = `${$.plugin.root.replace(/\\/g, '/')}/tts/setup.py`
   const home = await homeFolder($)
 
+  await stopDaemon($)
   for (const python of ['python', 'py', 'python3']) {
     const ran = await $.process
-      .run([python, '-B', script], {
+      .run([python, '-B', script, step], {
         timeoutMs: SETUP_TIMEOUT_MS,
         env: { READ_ALOUD_HOME: home },
       })
@@ -406,17 +433,74 @@ const setUp = async ($: EngineInterface): Promise<string> => {
     if (ran === undefined) {
       continue
     }
-    const tail = `${ran.stdout}\n${ran.stderr}`.trim().split('\n').slice(-6).join('\n')
-    if (ran.exitCode !== 0) {
-      return `read-aloud: setup failed (${python}).\n${tail}`
-    }
+    // Every line but a download's progress, which only its last one is worth.
+    const lines = `${ran.stdout}\n${ran.stderr}`.split('\n').map(line => line.trim())
+    const report = lines.filter(line => line !== '' && !/ \d+ MB( of \d+)?$/.test(line)).slice(-10).join('\n')
+
     hasToldMissing = false
     await running($)
 
-    return `read-aloud: the voice is installed.\n${tail}`
+    return { isDone: ran.exitCode === 0, report }
   }
 
-  return 'read-aloud: no Python found. Install Python 3.10 or newer, then run /read-aloud setup.'
+  return { isDone: false, report: 'No Python found. Install Python 3.10 or newer and run it again.' }
+}
+
+const setUp = async ($: EngineInterface): Promise<string> => {
+  const { isDone, report } = await runSetup($, 'all')
+
+  return `read-aloud: ${isDone ? 'the voice is installed.' : 'setup failed.'}\n${report}`
+}
+
+const isNewer = (theirs: string, ours: string): boolean => {
+  const [a, b] = [theirs, ours].map(version => version.split('.').map(part => Number.parseInt(part, 10) || 0))
+  for (let at = 0; at < 3; at += 1) {
+    const difference = (a?.[at] ?? 0) - (b?.[at] ?? 0)
+    if (difference !== 0) {
+      return difference > 0
+    }
+  }
+
+  return false
+}
+
+/**
+ * One line on the mod itself: its version here against the one its GitHub
+ * repository (the manifest's `homepage`) publishes. Empty when it cannot tell.
+ */
+const modNews = async ($: EngineInterface): Promise<string> => {
+  try {
+    const own = JSON.parse(await $.fs.read(`${$.plugin.root}/.claude-plugin/plugin.json`)) as Record<string, unknown>
+    const home = typeof own.homepage === 'string' ? own.homepage : ''
+    if (typeof own.version !== 'string' || !home.startsWith('https://github.com/')) {
+      return ''
+    }
+    const raw = home.replace('https://github.com/', 'https://raw.githubusercontent.com/').replace(/\/$/, '')
+    const published = await $.http.fetch(`${raw}/HEAD/.claude-plugin/plugin.json`)
+    const theirs = published.ok ? (JSON.parse(published.text) as Record<string, unknown>).version : undefined
+    if (typeof theirs !== 'string') {
+      return ''
+    }
+
+    return isNewer(theirs, own.version)
+      ? `mod: version ${theirs} is out and this is ${own.version}. Update it with: claude plugin update, then /reload-plugins`
+      : `mod: version ${own.version} is the newest published.`
+  } catch {
+    return ''
+  }
+}
+
+const updateRuntime = async ($: EngineInterface): Promise<string> => {
+  const home = await homeFolder($)
+  if ((await findPython($, home)) === undefined) {
+    return 'read-aloud: the voice is not installed yet. Run /read-aloud setup'
+  }
+  const { isDone, report } = await runSetup($, 'update')
+  const news = await modNews($)
+
+  return [`read-aloud: ${isDone ? 'the voice is up to date.' : 'the update failed.'}`, report, news]
+    .filter(part => part !== '')
+    .join('\n')
 }
 
 const setVoice = async ($: EngineInterface, key: 'voice' | 'promptVoice', name: string): Promise<string> => {
@@ -548,6 +632,8 @@ const runCommand = async ($: EngineInterface, args: string): Promise<string> => 
         : 'Nothing to say, or the voice is not installed (/read-aloud setup).'
     case 'setup':
       return setUp($)
+    case 'update':
+      return updateRuntime($)
     default:
       return `No such setting: ${verb}\n${HELP}`
   }
@@ -559,7 +645,7 @@ export const register: Register = on => {
     await $.command.register({
       name: 'read-aloud',
       description: 'Read Claude aloud: triggers, last, selection, voice, speed (bare: status)',
-      argumentHint: '[on|off|triggers|last|selection|replies|prompts|voice|speed|volume|say|setup|help]',
+      argumentHint: '[on|off|triggers|last|selection|replies|prompts|voice|speed|volume|say|setup|update|help]',
       immediate: true,
     })
     await $.command.register({

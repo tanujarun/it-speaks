@@ -42,6 +42,19 @@ LANGUAGES = {
 }
 
 
+def model_file_names():
+    """The model and voices files, as models.json beside this file names them."""
+    names = {"model": "kokoro-v1.0.onnx", "voices": "voices-v1.0.bin"}
+    try:
+        manifest = json.loads(Path(__file__).with_name("models.json").read_text(encoding="utf-8"))
+        for entry in manifest["files"]:
+            if entry.get("role") in names:
+                names[entry["role"]] = entry["name"]
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    return names
+
+
 def emit(event, **fields):
     try:
         sys.stdout.write(json.dumps({"event": event, **fields}) + "\n")
@@ -102,8 +115,9 @@ class ParentWatch:
 
 class Speaker:
     def __init__(self, models):
-        self.model_path = str(models / "kokoro-v1.0.onnx")
-        self.voices_path = str(models / "voices-v1.0.bin")
+        names = model_file_names()
+        self.model_path = str(models / names["model"])
+        self.voices_path = str(models / names["voices"])
         self.voices = self.read_voice_names()
         self.kokoro = None
         self.lock = threading.Lock()
@@ -213,9 +227,6 @@ class Speaker:
     # Samples to the speakers.
 
     def play_forever(self):
-        import numpy
-        import sounddevice
-
         stream = None
         while True:
             try:
@@ -230,6 +241,11 @@ class Speaker:
             if not self.is_current(generation):
                 continue
             try:
+                # Imported at the first sound, so a process that has said
+                # nothing holds none of the packages an update replaces.
+                import numpy
+                import sounddevice
+
                 if stream is None or stream.samplerate != rate:
                     if stream is not None:
                         stream.close()
