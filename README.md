@@ -79,6 +79,11 @@ updates brings an install in line with it.
 - **`/read-aloud selection`** reads the text you selected with the mouse.
 - **`/hush`** stops the speech. So does submitting a prompt or interrupting a
   turn.
+- **The indicator.** While something is being read, the right end of the
+  prompt's footer (the bottom right corner) says `reading aloud · /hush stops
+  it`, beside the mode labels Claude Code shows there, and `loading the voice`
+  while the model loads for the first utterance. Nothing is pinned to the
+  status line under the prompt.
 
 Code blocks and tables are named ("Code block.") rather than read out.
 

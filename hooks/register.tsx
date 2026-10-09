@@ -5,6 +5,7 @@ import { paintOf } from './skin-paint'
 import type { Paint } from './skin-paint'
 
 import { toSpeech } from './speech-text'
+import type { Saying } from '../types'
 
 // Speech is made by a process of the mod's own (tts/daemon.py: Kokoro-82M, an
 // open-source model, through kokoro-onnx), started once per session and told
@@ -56,6 +57,16 @@ const DEFAULTS: Settings = {
 const PROMPT_LIMIT = 600
 const READ = '\u{1F50A} read'
 const STOP = '■ stop'
+
+// What the footer's indicator says while the speech process works.
+const INDICATOR: Readonly<Record<Saying, string | undefined>> = {
+  idle: undefined,
+  loading: 'loading the voice',
+  speaking: 'reading aloud · /hush stops it',
+}
+
+// What the speech process is doing now; the footer's indicator draws from it.
+const saying = atom({ plugin: 'read-aloud', key: 'saying' } as const, 'idle' as Saying)
 
 // One member per transcript row: true on the row whose text is being read.
 const playing = atom({ plugin: 'read-aloud', key: 'playing' } as const, false)
@@ -123,6 +134,10 @@ let utterance = 0
 let playingRow: string | undefined
 let awaited: string | undefined
 
+const setSaying = ($: EngineInterface, now: Saying): void => {
+  void update($, saying, () => now).catch(() => {})
+}
+
 const setPlaying = async ($: EngineInterface, row: string | undefined): Promise<void> => {
   const before = playingRow
   playingRow = row
@@ -180,14 +195,14 @@ const onDaemonEvent = ($: EngineInterface, mine: Daemon, line: string): void => 
   if (said.event === 'ready' && Array.isArray(said.voices)) {
     mine.voices = said.voices.filter((voice): voice is string => typeof voice === 'string')
   } else if (said.event === 'loading') {
-    $.ui.status('read-aloud: loading the voice')
+    setSaying($, 'loading')
   } else if (said.event === 'speaking') {
-    $.ui.status('read-aloud: speaking (/hush stops it)')
+    setSaying($, 'speaking')
     if (said.id === awaited) {
       awaited = undefined
     }
   } else if (said.event === 'idle') {
-    $.ui.status(undefined)
+    setSaying($, 'idle')
     if (awaited === undefined) {
       void setPlaying($, undefined)
     }
@@ -220,7 +235,7 @@ const follow = async ($: EngineInterface, mine: Daemon, argv: readonly string[])
   } finally {
     if (daemon === mine) {
       daemon = undefined
-      $.ui.status(undefined)
+      setSaying($, 'idle')
     }
   }
 }
@@ -761,6 +776,16 @@ export const register: Register = on => {
     return withTrigger($.ui.resolve(e), drawn, isPlaying, await skinPaint($), () => {
       void toggle($, row, text, 'promptVoice')
     })
+  })
+
+  // The indicator: one more of the dim labels at the right of the prompt's
+  // footer, the bottom right corner, for as long as a row is being read.
+  on('ui.render', { component: 'SessionMode' }, async ($, e, next) => {
+    const label = INDICATOR[await read($, saying)]
+
+    return label === undefined
+      ? next(e)
+      : next({ ...e, props: { ...e.props, modes: [...e.props.modes, label] } })
   })
 
   on('command.run', { command: 'read-aloud' }, async ($, e) => {

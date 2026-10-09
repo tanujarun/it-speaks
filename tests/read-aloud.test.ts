@@ -17,7 +17,6 @@ const HOME = 'C:/Users/tester'
 const machine = (on: On, settings?: Record<string, unknown>) => {
   const commands: Command[] = []
   const spawned: (readonly string[])[] = []
-  const statuses: (string | undefined)[] = []
   let end = (): void => {}
   const ended = new Promise<void>(resolve => {
     end = resolve
@@ -30,11 +29,6 @@ const machine = (on: On, settings?: Record<string, unknown>) => {
   on('prompt.submit', (_$, e) => ({ text: e.text }))
   on('turn.start', (_$, e) => ({ turnId: e.turnId }))
   on('turn.complete', (_$, e) => ({ text: e.answer }))
-  on('ui.status', (_$, e) => {
-    statuses.push(e.text)
-
-    return { value: undefined }
-  })
   on('ui.toast', () => ({ value: undefined }))
   on('ui.log', () => ({ value: undefined }))
   on('fs.exists', () => ({ value: true }))
@@ -50,8 +44,12 @@ const machine = (on: On, settings?: Record<string, unknown>) => {
   })
   on('ui.invalidate', () => ({ value: undefined }))
   on('ui.selection', () => ({ value: { text: 'Only these words.' } }))
-  // The row as the engine would draw it, for the mod's render hooks to wrap.
-  on('ui.render', () => ({ type: 'Text', children: ['the row'] }))
+  // The row as the engine would draw it, for the mod's render hooks to wrap;
+  // the footer's mode labels joined as the engine joins them.
+  on('ui.render', (_$, e) => ({
+    type: 'Text',
+    children: [e.component === 'SessionMode' ? e.props.modes.join(' & ') || 'no modes' : 'the row'],
+  }))
 
   // What the speech process reports, a line at a time, as the test says it.
   const reports: string[] = []
@@ -83,7 +81,7 @@ const machine = (on: On, settings?: Record<string, unknown>) => {
     return { value: { code: 0, signal: null } }
   })
 
-  return { commands, spawned, statuses, end, report }
+  return { commands, spawned, end, report }
 }
 
 declare const setTimeout: (run: () => void, ms: number) => unknown
@@ -98,6 +96,8 @@ const until = async (isSo: () => Promise<boolean>): Promise<void> => {
 }
 
 const SCREEN = { columns: 100, rows: 40, isFullscreen: true }
+
+const FOOTER = { plugin: 'read-aloud', component: 'SessionMode', props: { modes: ['focus'] } } as const
 
 const reply = (text: string) =>
   ({ plugin: 'read-aloud', component: 'AssistantMessage', props: { text, isFirstOfReply: true } }) as const
@@ -236,9 +236,10 @@ describe('read-aloud', () => {
   })
 
   test('a reply carries a trigger that reads it whole, and stops it while it plays', async ($, on) => {
-    const { commands, statuses, end, report } = machine(on, { limit: 10 })
+    const { commands, end, report } = machine(on, { limit: 10 })
     await begin($)
     const ui = await $.ui.mount({ ...reply('All **three** tests pass.'), surface: 'terminal', viewport: SCREEN })
+    const footer = await $.ui.mount({ ...FOOTER, surface: 'terminal', viewport: SCREEN })
     const label = async () => (await ui.find({ key: 'read-aloud' }))?.text ?? ''
 
     expect(await label()).toContain('read')
@@ -250,7 +251,7 @@ describe('read-aloud', () => {
     // The stop before it reported idle; that is not this utterance's end.
     report({ event: 'idle' })
     report({ event: 'speaking', id: 'u1' })
-    await until(async () => statuses.some(status => status?.includes('speaking') === true))
+    await until(async () => ((await footer.find({ type: 'Text' }))?.text ?? '').includes('reading aloud'))
     expect(await label()).toContain('stop')
 
     await ui.press({ key: 'read-aloud' })
@@ -499,37 +500,50 @@ describe('read-aloud', () => {
     end()
   })
 
-  test('shows while it speaks, and clears when it is done', async ($, on) => {
-    const statuses: (string | undefined)[] = []
-    let quiet = (): void => {}
-    const isQuiet = new Promise<void>(resolve => {
-      quiet = resolve
-    })
-    mock.store(on)
-    mock.env(on, { USERPROFILE: HOME })
-    on('session.start', (_$, e) => ({ cwd: e.cwd }))
-    on('command.register', (_$, e) => ({ value: { command: e.name } }))
+  // Each report is drawn at the kit's redraw rate, so six of them take a while.
+  test("says it is reading at the right of the prompt's footer, and clears when it is done", { timeoutMs: 20_000 }, async ($, on) => {
+    const { end, report } = machine(on)
+    await begin($)
+    for (const surface of ['terminal', 'desktop'] as const) {
+      const footer = await $.ui.mount({ ...FOOTER, surface, viewport: SCREEN })
+      const shown = async () => (await footer.find({ type: 'Text' }))?.text ?? ''
+
+      expect(await shown()).toBe('focus')
+
+      report({ event: 'loading' })
+      await until(async () => (await shown()).includes('loading'))
+      expect(await shown()).toBe('focus & loading the voice')
+
+      report({ event: 'speaking', id: 'u1' })
+      await until(async () => (await shown()).includes('reading'))
+      expect(await shown()).toBe('focus & reading aloud · /hush stops it')
+
+      report({ event: 'idle' })
+      await until(async () => (await shown()) === 'focus')
+      expect(await shown()).toBe('focus')
+      await footer.unmount()
+    }
+    end()
+  })
+
+  test('leaves the status line under the prompt alone', async ($, on) => {
+    const { end, report } = machine(on)
+    const pinned: (string | undefined)[] = []
     on('ui.status', (_$, e) => {
-      statuses.push(e.text)
-      if (e.text === undefined) {
-        quiet()
-      }
+      pinned.push(e.text)
 
       return { value: undefined }
     })
-    on('ui.log', () => ({ value: undefined }))
-    on('fs.exists', () => ({ value: true }))
-    on('process.spawn', async function* () {
-      yield { stream: 'stdout', text: '{"event": "ready", "voices": []}\n{"event": "spea' }
-      yield { stream: 'stdout', text: 'king", "id": "u1"}\n{"event": "idle"}\n' }
-
-      return { value: { code: 0, signal: null } }
-    })
     await begin($)
-    await isQuiet
+    const footer = await $.ui.mount({ ...FOOTER, surface: 'terminal', viewport: SCREEN })
 
-    expect(statuses[0]).toContain('speaking')
-    expect(statuses.at(-1)).toBeUndefined()
+    report({ event: 'speaking', id: 'u1' })
+    await until(async () => ((await footer.find({ type: 'Text' }))?.text ?? '').includes('reading'))
+    report({ event: 'idle' })
+    await until(async () => (await footer.find({ type: 'Text' }))?.text === 'focus')
+
+    expect(pinned).toEqual([])
+    end()
   })
 
   test('asks for setup, and speaks nothing, while the voice is not installed', async ($, on) => {
